@@ -1,0 +1,2 @@
+# dataScienceCapstone_Week2Assignmente
+exploratory assignment and natural language processing

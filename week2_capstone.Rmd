@@ -1,0 +1,827 @@
+
+---
+title: "week_2_capstone"
+author: "sandro"
+date: "21/5/2018"
+output: html_document
+---
+#Peer-graded Assignment: Milestone Report
+This is the task 3 Milestone Report of the week 2 of Data Science Capstone of Coursera.  
+This Rpubs document shows that the data Coursera-SwiftKey.zip were downloaded and analysed in their main features in order to create a prediction algorithm as explained in the guideline.
+The aim of the final project is building an app which allow to predict the next word of a sentence given a series of input words.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, collapse = TRUE, warning=FALSE, message = FALSE, fig.width = 10, fig.align = "center")
+require(tm)
+require(wordcloud)
+require(memoise)
+require(RColorBrewer)
+require(qdap) #se hai problemi con qdap o JavaVM vedi sotto le spiegazioni
+library(reshape2)
+library(ggplot2)
+library(dplyr)
+library(tidytext)
+library(stringi)
+library(stringr)
+library(ngram)
+require(tau)
+library(knitr)
+
+```
+
+###Downloading files
+The first step is download the data from the address "https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip"
+```{r downloading data, comment=FALSE}
+
+setwd("/Users/sandrogambino/Desktop/coursers/data_scientist_coursera/10.capstone/")
+
+if(!file.exists("./Coursera-SwiftKey.zip")){
+    download.file("https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip", destfile="./Coursera-SwiftKey.zip", method="auto")
+    
+}
+
+if (!file.exists("./dataCapstone")) {
+    unzip("./Coursera-SwiftKey.zip", files=c("final/en_US/en_US.blogs.txt", "final/en_US/en_US.news.txt", "final/en_US/en_US.twitter.txt"), exdir="dataCapstone", junkpaths=T)
+
+}
+
+
+```
+
+```{r print}
+setwd("/Users/sandrogambino/Desktop/coursers/data_scientist_coursera/10.capstone/dataCapstone")
+print("Downloaded data files used in the next sections:")
+print(list.files(pattern = "txt"))
+```
+
+###Expoloratory analisys of the raw data files  
+Size, number of lines, max length of line in characters and number of words of each the previous three files are given in the following analysis.  
+
+
+```{r exploratory analisys, warning=FALSE, results='asis'}
+
+
+
+setwd("/Users/sandrogambino/Desktop/coursers/data_scientist_coursera/10.capstone/dataCapstone")
+
+txtFiles<-list.files(path = ".", pattern = "^[en_US]")
+
+
+fileInformations <- function(fileData) {
+    
+    size.Mb <- file.info(fileData)$size/1024/1024
+    linesFile <- readLines(fileData, warn=F, skipNul=T)
+    line.MaxLength <- max(nchar(linesFile))
+    wordsFile.Number <- sum(stri_count_words(linesFile))
+    
+    fileList<-list("Size (Mb)"=size.Mb, "Lines count"=length(linesFile), 
+              "MaxLength Line (characters)"=line.MaxLength, "Word count"=wordsFile.Number)
+    
+    #return(fileList)
+}
+
+data.synthesis<-sapply(txtFiles, fileInformations)
+ds<-as.data.frame(data.synthesis)
+kable(ds)
+```
+
+
+###Sampling files
+In this section 1% of the lines of each original text file was randomly taken.
+A summary analysis was then performed for each sample file.
+
+```{r sampling data, warning=FALSE}
+
+setwd("/Users/sandrogambino/Desktop/coursers/data_scientist_coursera/10.capstone/dataCapstone")
+#########################################################
+#sampling files in "./dataSamples"
+#########################################################
+
+set.seed(2018)
+text_file_sample <- function(infile, outfile, prob){
+    conn<-file(infile, "r")
+    fulltext<-readLines(conn)
+    nlines<-length(fulltext)
+    close(conn)
+    
+    conn<-file(outfile, "w")
+    selection<-rbinom(nlines, 1, prob)
+    for(i in 1:nlines){
+        if (selection[i]==1){cat(fulltext[i], file = conn, sep = "\n")}
+    }
+    close(conn)
+    
+}
+
+
+#creo la directory dell'output sample
+if(!(dir.exists("./dataSamples"))){
+    dir.create("./dataSamples")
+}
+
+#creo samples 
+fraction<-0.01 #fraction of sample 
+
+sample_file<-paste0(getwd(), "/dataSamples/blogsSample.txt") 
+                                                            
+if (!file.exists(sample_file)) {
+  text_file_sample(paste0(getwd(), "/en_US.blogs.txt"),
+                 sample_file, prob = fraction)
+}
+
+sample_file<-paste0(getwd(), "/dataSamples/newsSample.txt")
+if (!file.exists(sample_file)) {
+  text_file_sample(paste0(getwd(), "/en_US.news.txt"),
+                 sample_file, prob = fraction)
+
+}
+
+sample_file<-paste0(getwd(), "/dataSamples/twitterSample.txt")
+if (!file.exists(sample_file)) {
+  text_file_sample(paste0(getwd(), "/en_US.twitter.txt"),
+                 sample_file, prob = fraction)
+}
+
+setwd("/Users/sandrogambino/Desktop/coursers/data_scientist_coursera/10.capstone/dataCapstone/dataSamples")
+
+txtFiles<-list.files(path = ".", pattern = "Sample.txt")
+
+fileInformations <- function(fileData) {
+    
+    size.Mb <- file.info(fileData)$size/1024/1024
+    linesFile <- readLines(fileData, warn=F, skipNul=T)
+    line.MaxLength <- max(nchar(linesFile))
+    wordsFile.Number <- sum(stri_count_words(linesFile))
+    
+    fileList<-list("Size (Mb)"=size.Mb, "Lines count"=length(linesFile), 
+              "MaxLength Line (characters)"=line.MaxLength, 
+              "Word count"=wordsFile.Number)
+    
+    #return(fileList)
+}
+
+data.synthesis<-sapply(txtFiles, fileInformations)
+df.samples<-as.data.frame(data.synthesis)
+kable(df.samples)
+```
+
+
+###Cleaning and exploring each sample file.
+Each sample file was cleaned of numbers, punctuation, whitespace and profanity.
+Stop words were not cutting away to not reduce the perfomance of prediction.
+Finally a graph of the most 50 frequent words in each sample file was displayed. 
+
+```{r cleaning, warning=FALSE}
+
+#########################################################
+#cleaning samples and word clouds
+#########################################################
+
+
+
+setwd("/Users/sandrogambino/Desktop/coursers/data_scientist_coursera/10.capstone/dataCapstone/dataSamples")
+
+#create a list of samples in en_US
+samples<-list.files(path = ".", pattern = "Sample.txt")
+
+#using "memoise" to automatically cache the results
+getTermMatrix <- function(sample) {
+    
+    if (!(sample %in% samples))
+    stop("Unknown sample")
+    
+    #print(sample)
+    
+    #########################
+    text <- readLines(sample, encoding = "UTF-8") 
+                                    #vedi help readLines per ricodificare text
+                                    #readLines produces a vector of strings, one per line
+
+
+    
+    text <- gsub("don’t", "do not", text)
+    text <- gsub("don t", "do not", text)
+    text <- gsub("’s", " is", text)
+    text <- gsub(" s", "is", text)
+    text <- gsub("'m| ’m| m", " am", text)
+    text <- gsub("i m", "i am", text)
+    text <- gsub("’re", " are", text)
+    text <- gsub("’ve", " have", text)
+    text <- gsub("’ll", " will", text)
+    text <- gsub("won’t|won t", "will not", text)
+    text <- gsub("can t", "cannot", text)
+    text <- gsub("it s", " it is", text)
+    text <- gsub(".com|–|—|…|“|”|‘", " ", text)
+    
+    #uso tm per successive elaborazioni del testo
+    myCorpus = Corpus(VectorSource(text))
+    
+    myCorpus = tm_map(myCorpus, content_transformer(tolower))
+    
+    #decido di non rimuovere le stop words
+    #myCorpus = tm_map(myCorpus, removeWords, stopwords(kind="en"))
+                                            
+    myCorpus = tm_map(myCorpus, removePunctuation)
+    
+    
+    myCorpus = tm_map(myCorpus, removeNumbers)
+    
+    myCorpus = tm_map(myCorpus, removeWords,
+    c("shit", "fuck", "piss", "bitch", "dick", "pussy"))
+    
+    myCorpus = tm_map(myCorpus, stripWhitespace)
+    
+    
+    myDTM = TermDocumentMatrix(myCorpus,
+              control = list(minWordLength = 1))
+  
+    m <- as.matrix(myDTM)
+    v <-sort(rowSums(m), decreasing = TRUE)
+    
+    ##################
+    ###conto frequenza parole
+    ##################
+    #print(v) #stampa tutte le parole
+    
+    d <- data.frame(word = names(v),freq=v)
+    
+    #totalWords<-sum(d$freq)
+    #print(totalWords)
+    #print(head(d, 10)) #stampa sole le prime 10 parole più frequenti
+    
+    #set.seed(2018)
+    ##################
+    #wordcloud bn
+    ##################
+    #wordcloud(d$word,d$freq, random.order = FALSE, max.words = 100)
+    
+    ##################
+    #wordcloud colorata
+    ##################
+    #wordcloud(words = d$word, freq = d$freq, min.freq = 1,
+    #      max.words=100, random.order=FALSE, rot.per=0.35, 
+    #      colors=brewer.pal(8, "Dark2"))
+    
+top10Words <- head(v, 50)
+
+#NB la differenza tra usare e non usare melt() nel trasformare il df
+dfplot <- as.data.frame(melt(top10Words))
+
+#row.names(dfplot) è uguale a dfplot$word <- dimnames(dfplot)[[1]]
+dfplot$word <-row.names(dfplot)
+
+#devo trasformare in una variabile "categorica", quindi uso la 
+#funzione factor che trasforma i valori del vettore in livelli della 
+#variabile categorica
+dfplot$word <- factor(dfplot$word,
+                      levels=dfplot$word[order(dfplot$value,
+                                               decreasing=TRUE)])
+
+fig <- ggplot(dfplot, aes(x=word, y=value)) + geom_bar(stat="identity")
+fig <- fig + xlab("Word in Corpus")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+fig <- fig + ylab("Count")+ggtitle(sample)
+print(fig)
+}
+
+#applico la funzione ai 3 sample
+tab<-sapply(samples, getTermMatrix)
+#tab
+```
+  
+
+###A unique text corpus
+I decided to unify the sample files in a unique corpus for the final prediction project.
+An expolaratory analysis of this corpus was performed after having included only words with a frequence over 1.
+
+
+```{r unico corpus 1, warning=FALSE}
+
+#########################################################
+#cleaning and elaboration 
+#########################################################
+
+
+setwd("/Users/sandrogambino/Desktop/coursers/data_scientist_coursera/10.capstone/dataCapstone/dataSamples")
+
+
+
+#create a list of samples in en_US
+samples<-list.files(path = "/Users/sandrogambino/Desktop/coursers/data_scientist_coursera/10.capstone/dataCapstone/dataSamples", pattern = "Sample.txt")
+connout<-file("outfile.txt", "w")
+
+#unisco i sample files
+for(i in 1:length(samples)) {
+    
+    conn<-file(samples[i],"r")
+    #a<-file.info(samples[i])$size/1024^2
+    #print(a)
+    fulltext<-readLines(conn)
+    nlines<-length(fulltext)
+    #print(nlines)
+    close(conn)
+    
+    for(i in 1:nlines){
+        cat(fulltext[i], file = connout, sep = "\n", append = TRUE)
+    }
+    
+    #controllo che il file di output aumenti progressivamente di dimensioni
+    #a<-file.info("outfile.txt")$size/1024^2
+    #print(a)
+    #fulltext<-readLines("outfile.txt")
+    #nlines<-length(fulltext)
+    #print(nlines)
+}
+close(connout)
+#list.files()
+
+text <- readLines("outfile.txt", encoding = "UTF-8") 
+                                    #vedi help readLines per ricodificare text
+                                    #readLines produces a vector of strings, one per line
+
+#controllo dimensioni e numero linee di outfile.txt
+
+size.Mb <- file.info("outfile.txt")$size/1024/1024
+    print(paste0("The unique corpus has size (Mb) =", round(size.Mb, 2)))
+wordsFile.Number <- sum(stri_count_words(text))
+    print(paste0("the unique corpus has words =", wordsFile.Number))
+
+
+#devo cancellare "outfile.txt" perché se no a ogni prova aggiungo i file
+unlink(file.path(getwd(), "./outfile.txt"))
+
+#verifico di aver cancellato outfile.txt
+#list.files()
+
+
+
+    
+    text <- gsub("don’t", "do not", text)
+    text <- gsub("’s", " is", text)
+    text <- gsub("’m", " am", text)
+    text <- gsub("’re", " are", text)
+    text <- gsub("’ve", " have", text)
+    text <- gsub("’ll", " will", text)
+    text <- gsub("won’t|won t", "will not", text)
+    text <- gsub(".com|–|—|…|“|”|‘", " ", text)
+```
+    
+    
+
+ 
+ 
+###Evaluation of the relevance of foreign words  
+
+We used the "cldr" package to check the ratio of non english words to english words. If the ratio is small then the presence of foreign words can be considered negligible.  
+
+```{r foreign words}
+url <- "http://cran.us.r-project.org/src/contrib/Archive/cldr/cldr_1.1.0.tar.gz"
+pkgFile<-"cldr_1.1.0.tar.gz"
+download.file(url = url, destfile = pkgFile)
+install.packages(pkgs=pkgFile, type="source", repos=NULL)
+unlink(pkgFile)
+library(cldr)
+sentences<-text
+ token.language <- detectLanguage(sentences)
+english.words <- which(token.language$percentScore1 > 50 & token.language$detectedLanguage == "ENGLISH")
+foreign.words <- which(token.language$percentScore1 > 50 & token.language$detectedLanguage != "ENGLISH")
+round(length(foreign.words)*100/length(english.words), 2)
+
+#elimino i caratteri non alfanumerici
+text <- gsub(pattern = '[^a-zA-Z0-9\\s]+', text, replacement = " ", ignore.case = TRUE, perl = TRUE)
+
+
+#ricalcolo la percentuale di parole straniere
+sentences<-text
+ token.language <- detectLanguage(sentences)
+english.words <- which(token.language$percentScore1 > 50 & token.language$detectedLanguage == "ENGLISH")
+foreign.words <- which(token.language$percentScore1 > 50 & token.language$detectedLanguage != "ENGLISH")
+round(length(foreign.words)*100/length(english.words), 2)
+```  
+
+The ratio of foreign words over English words is less than 5%. The numbers above are the percentages of non english words before and after removing wrods with no-alfa-numeric characters, for example chineese idioms. Since the ratio is small, the presence of foreign words in the corpus does not impact the algorithm significantly.  
+
+
+ 
+ 
+```{r unico corpus2, warning=FALSE}
+
+    #uso tm per successive elaborazioni del testo
+    myCorpus = Corpus(VectorSource(text))
+    
+    myCorpus = tm_map(myCorpus, content_transformer(tolower))
+    
+    #decido di non rimuovere le stop words
+    #myCorpus = tm_map(myCorpus, removeWords, stopwords(kind="en"))
+                                            
+    myCorpus = tm_map(myCorpus, removePunctuation)
+    
+    
+    myCorpus = tm_map(myCorpus, removeNumbers)
+    
+    myCorpus = tm_map(myCorpus, removeWords,
+    c("shit", "fuck", "piss", "bitch", "dick", "pussy"))
+    
+    myCorpus = tm_map(myCorpus, stripWhitespace)
+    
+    
+    myDTM = TermDocumentMatrix(myCorpus,
+              control = list(minWordLength = 1))
+  
+    m <- as.matrix(myDTM)
+    v <-sort(rowSums(m), decreasing = TRUE)
+    
+    ##################
+    ###conto frequenza parole
+    ##################
+    #print(v) #stampa tutte le parole
+    
+    d <- data.frame(word = names(v),freq=v)
+    d<-filter(d, d$freq>1)
+    
+    #set.seed(2018)
+    ##################
+    #wordcloud bn
+    ##################
+    #wordcloud(d$word,d$freq, random.order = FALSE, max.words = 100)
+    
+    ##################
+    #wordcloud colorata
+    ##################
+    #wordcloud(words = d$word, freq = d$freq, min.freq = 1,
+    #      max.words=100, random.order=FALSE, rot.per=0.35, 
+    #      colors=brewer.pal(8, "Dark2"))
+    
+
+
+#NB la differenza tra usare e non usare melt() nel trasformare il df
+#dfplot <- as.data.frame(melt(head(v, 100)))
+
+    
+#row.names(dfplot) è uguale a dfplot$word <- dimnames(dfplot)[[1]]
+#dfplot$word <-row.names(dfplot)
+
+#devo trasformare in una variabile "categorica", quindi uso la 
+#funzione factor che trasforma i valori del vettore in livelli della 
+#variabile categorica
+#dfplot$word <- factor(dfplot$word,
+#                      levels=dfplot$word[order(dfplot$value,
+#                                               decreasing=TRUE)])
+#dfplot<-filter(dfplot, dfplot$value>10)
+#fig <- ggplot(dfplot, aes(x=word, y=value)) + geom_bar(stat="identity")
+#fig <- fig + xlab("Word in Corpus")+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+#fig <- fig + ylab("Count")+ggtitle("Sample texts")
+#fig
+
+```
+
+
+
+  
+
+###Zipf's Law Distribution of the words of the corpus   
+These graphs show how the distribution of the words in this text follows the hypercolic Zipf's law. 
+The first graph shows Zip's law distibution in absolute values and the second one in relative values. Only the most 50 frequent words were shown in the final graph.
+
+```{r Zipf’s law}
+    #in valori assoluti
+    
+    d$word <- factor(d$word, levels=d$word[order(d$freq, decreasing=TRUE)])
+    gg_word<-ggplot(head(d, 80), aes(word, freq))+geom_bar(stat="identity")+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    gg_word
+    
+    #in frequenze relative (the number of times a word appears in the corpus divided by the total number of terms (words))
+    
+freq_d<-mutate(d, cum_frequency=cumsum(freq))
+freq_d<-mutate(freq_d, relative=prop.table(freq))
+freq_d<-mutate(freq_d, cum_relative=cumsum(relative))
+freq_d<-mutate(freq_d, index= rep(1, length(d$word)))
+freq_d<-mutate(freq_d, cum_index=row_number()) #row_number mi dà il numero di riga
+    
+    freq_d$word <- factor(freq_d$word, levels=freq_d$word[order(freq_d$freq, decreasing=TRUE)])
+    gg_word2<-ggplot(head(freq_d,80), aes(word, relative))+geom_bar(stat="identity")+theme(axis.text.x = element_text(angle = 45, hjust = 1))
+    gg_word2
+```
+  
+  
+###Frequency distribution of words    
+The following graph and table show how only a minimal percentage (about 1%) of single words cover half of the total words of the corpus text. Finally it show how 90% of the total words of the corpus text is covered by only 25% of the single tokens.  
+```{r cumulative frequency}
+
+
+
+g<-ggplot(freq_d, aes(x=cum_index, y=cum_relative)) +  geom_step() + ggtitle("Cumulative frequency of words") + xlab("Words")+ ylab("Percentage") + geom_hline(aes(yintercept=0.5), color="red") + geom_hline(aes(yintercept=0.9), color="green")
+
+#trovo il punto di intersezione con la linea h 0.5
+#il 50% delle parole nel testo è data da questo numero di singole parole
+difference<-freq_d$cum_relative-0.5
+intersection.point<-which.min(abs(difference))
+intersection.point.5<-freq_d[intersection.point,]$cum_index
+
+#trovo il punto di intersezione con la linea h 0.9
+#il 90% delle parole nel testo è data da questo numero di singole parole
+difference<-freq_d$cum_relative-0.9
+intersection.point<-which.min(abs(difference))
+intersection.point.9<-freq_d[intersection.point,]$cum_index
+
+#aggiungo la linea al grafico
+g<-g+geom_vline(aes(xintercept = intersection.point.5), color="red")
+
+#aggiungo la linea al grafico
+g<-g+geom_vline(aes(xintercept = intersection.point.9), color="green")
+
+#aggiungo i punti
+g<-g+geom_point(aes(x=intersection.point.5, y=0.5), color="red") + geom_text(aes(x=intersection.point.5, y=0.5, label=intersection.point.5),size=3, hjust=1, vjust=1)+geom_point(aes(x= intersection.point.9, y=0.9), color="green") + geom_text(aes(x=intersection.point.9, y=0.9, label=intersection.point.9),size=3, hjust=1, vjust=-1)
+
+g
+
+#tabella riassuntiva
+nfreq<-c("50%", "90%")
+nw<-c(intersection.point.5, intersection.point.9)
+nratio<-nw*100/length(unique(d$word))
+label <- c("first level", "second level")
+table<-as.data.frame(cbind(nfreq, nw, round(nratio, 2)), row.names=label)
+names(table)<-c("Percentage of coverage", "Number of tokens", "Percentage of total tokens")
+kable(table)
+```  
+
+
+
+This graph shows how many times a word is present in the corpus with a particular frequency: the most part of words in the corpus are repeated few times, while only few words are repaeted several times.  
+```{r frequency graph}
+    #let’s look at the distribution of n/total for each novel, the number of times a word appears in a novel divided by the total number of terms (words) in that novel. This is exactly what term frequency is (https://www.tidytextmining.com/tfidf.html)
+    #metto in grafico il numero di ripetizioni di una parola (n) sul rapporto di n/totale di parole
+    #questo grafico mi dice quante volte conto la tal frequenza n/sum(n)
+    #vedo che le frequenze che si ripetono di più sono quelle basse, 
+    #ovviamente ci sono poche parole che si ripetono migliaia di volte!
+    freq_d$word <- factor(freq_d$word, levels=freq_d$word[order(freq_d$freq, decreasing=TRUE)])
+    gg_word3<-ggplot(freq_d, aes(freq/sum(freq)))+geom_histogram()+theme(axis.text.x = element_text(angle = 45, hjust = 1))+xlim(NA, 0.00009)
+    gg_word3
+```
+  
+The  following tables are other ways to show the distribution of words: this time the words are classified in ranks and for wach word the table shows its frequency absolute and relative and the cumulative frequency as well. 
+```{r frequency graph and table}
+    #The rank column here tells us the rank of each word within the frequency table; the table was already ordered by n so we could use row_number() to find the rank. Then, we can calculate the term frequency in the same way we did before. Zipf’s law is often visualized by plotting rank on the x-axis and term frequency on the y-axis, on logarithmic scales. Plotting this way, an inversely proportional relationship will have a constant, negative slope.
+    #Notice that plot gg_rank is in log-log coordinates. We see that relationship between rank and frequency does have negative slope. 
+    freq_by_rank <- freq_d %>% mutate(rank = row_number())
+    freq_by_rank2 <- select(freq_by_rank, c(rank, word, freq, cum_frequency, relative, cum_relative))
+    kable(head(freq_by_rank2))
+    freq_by_rank3 <- select(freq_by_rank, c(word, freq, cum_frequency, relative, cum_relative))
+    kable(tail(freq_by_rank3))
+    gg_rank<-freq_by_rank%>% 
+    ggplot(aes(rank, relative)) + 
+        geom_line(size = 1.1, alpha = 0.8) + 
+        scale_x_log10() +
+        scale_y_log10()
+    gg_rank
+```
+
+This table shows the ranges of absolute and relative fequency of words.
+```{r range}
+    #qual è il range di frequenza delle parole in valori assoluti e relativi?
+    #Table of the range of frequency of terms (absolute values in the first line, relative values in the second line)
+    a<-range(as.integer(freq_d$freq))
+    b<-range(round( as.double(freq_d$relative), 6))
+    label2 <- c("Range of frequency (absolute)", "Range of frequency (relative)")
+    table2<-as.data.frame(rbind(a, b), row.names=label2)
+    names(table2)<-c("Min", "Max")
+    kable(table2)
+```
+
+###Obtain the graph of n-gram with n = 2, 3, 4
+ngram package was used to obtain ngram tokens and then pruning is performed (only n-grams with frequence over 1 were included).  
+The most frequent n-gram are shown in the graphs.
+
+```{r tokenization with ngram package}
+#########################################################################
+#uso il pacchetto ngram
+
+#########################################################################
+#The tm package (Feinerer et al., 2008) requires that all data be in the form of its fairly compli- #cated Corpus object. The ngram package offers no direct methods for dealing with data in this #format. To use tm-encapsulated data, you will first need to extract it into a single string or a #vector of strings depending on what processing behavior is required.
+
+
+strCorpus <- concatenate(lapply(myCorpus, "[", 1))
+
+#While not strictly related to n-gram modeling, you may wish to get some basic summary counts
+#of your text. With the assumption that the text is a single string with words separated by one
+#or more spaces, we can very quickly generate these counts via the string.summary() function:
+
+
+#creo 2-gram file
+ng2 <- ngram(strCorpus, n=2)
+
+#ho diverse opzioni di stampa 
+#print(ng2, output="full"), se non ho tanti 2-grams
+#print(ng2, output="truncated"), ho ne ho tanti
+#get.phrasetable(ng2) -> sintetizzato
+
+n2grams<-get.phrasetable(ng2)
+
+#melt using ngrams as id variables
+dfplot <- as.data.frame(n2grams)
+dfplot <- filter(dfplot, dfplot$freq>1)
+#devo trasformare in una variabile "categorica", quindi uso la 
+#funzione factor che trasforma i valori del vettore in livelli della 
+#variabile categorica
+dfplot<- head(dfplot, 80)
+dfplot$ngrams <- factor(dfplot$ngrams,
+                      levels=dfplot$ngrams[order(dfplot$freq,
+                                               decreasing=TRUE)])
+
+fig <- ggplot(dfplot, aes(x=ngrams, y=freq)) + geom_bar(stat="identity")
+fig <- fig + xlab("Word in Corpus")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+fig <- fig + ylab("Count")+ggtitle("Most frequent 2-grams")
+print(fig)
+
+#######################################
+#######################################
+#######################################
+#######################################
+
+#creo 3-gram file
+ng3 <- ngram(strCorpus, n=3)
+
+n3grams<-get.phrasetable(ng3)
+
+dfplot <- as.data.frame(n3grams)
+dfplot <- filter(dfplot, dfplot$freq>1)
+dfplot<- head(dfplot, 80)
+#devo trasformare in una variabile "categorica", quindi uso la 
+#funzione factor che trasforma i valori del vettore in livelli della 
+#variabile categorica
+
+dfplot$ngrams <- factor(dfplot$ngrams,
+                      levels=dfplot$ngrams[order(dfplot$freq,
+                                               decreasing=TRUE)])
+
+fig <- ggplot(dfplot, aes(x=ngrams, y=freq)) + geom_bar(stat="identity")
+fig <- fig + xlab("Word in Corpus")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+fig <- fig + ylab("Count")+ggtitle("Most frequent 3-grams")
+fig
+
+
+#creo 4-gram file
+ng4 <- ngram(strCorpus, n=4)
+
+n4grams<-get.phrasetable(ng4)
+
+dfplot <- as.data.frame(n4grams)
+dfplot <- filter(dfplot, dfplot$freq>1)
+dfplot<- head(dfplot, 80)
+#devo trasformare in una variabile "categorica", quindi uso la 
+#funzione factor che trasforma i valori del vettore in livelli della 
+#variabile categorica
+dfplot$ngrams <- factor(dfplot$ngrams,
+                      levels=dfplot$ngrams[order(dfplot$freq,
+                                               decreasing=TRUE)])
+
+fig <- ggplot(dfplot, aes(x=ngrams, y=freq)) + geom_bar(stat="identity")
+fig <- fig + xlab("Word in Corpus")+
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+fig <- fig + ylab("Count")+ggtitle("Most frequent 4-grams")
+fig
+```
+
+```{r tokenization with tau package}
+    
+fun_gram_tau<-function(myCorpus, n_i, n_f){
+    
+
+    #seleziona gli n-gram che si vuole ottenere dal corpus
+    a<-n_i
+    b<-n_f
+    
+    for(j in a:b){
+        
+    #leggo il Corpus()
+    r<-textcnt(myCorpus, method = "string", decreasing = TRUE, n=j)
+    
+    #posso scegliere di ottenere i data in formato dataframe o in file
+    #ottengo dataframe
+    r_df<-data.frame(counts = unclass(r), size = nchar(names(r)))#ottengo dataframe
+    r_f<-format(r)
+    
+    n_grams<-row.names(r_df)
+    frequency<-r_df$counts
+    data_grams<-as.data.frame(cbind.data.frame(n_grams, frequency))
+    firstTerms<-rep(1, nrow(data_grams))
+    lastTerm<-rep(1, nrow(data_grams))
+    
+    #########################
+    #apro il file su cui scrivere
+    #OTTENGO 4 FILE .CSV CHE POSSO LEGGERE DIRETTAMENTE CON LA FUNZIONE read.csv()
+    ##########################
+    
+    conn<-file(paste("outfile_gram_", j, ".csv", sep = ""), "w")
+    
+    for(i in 1:length(n_grams)){
+    
+    # scrivo gli ngram sul file separando l'ultima parola
+    words = unlist(strsplit(n_grams[i], " "))
+    tempWords = words[1:(length(words)-1)]
+    firstTerms[i]=paste(tempWords, collapse=" ")
+    lastTerm[i] = words[length(words)]
+    cat(paste(firstTerms[i], lastTerm[i], frequency[i], sep = ","), file = conn, sep = "\n")
+    }
+    
+    df<-as.data.frame(cbind.data.frame(firstTerms, lastTerm, frequency))
+    head(df)
+    close(conn)
+    }
+
+}
+    
+fun_gram_tau(myCorpus, 1, 4)
+```
+
+
+###Pruning ngram files and percentage of saved information  
+The following table showes how many ngram are present in the ngram-dictionary before and after pruning with a frequency threshold of 1 (all ngrams with a frequency over 1 are mantained). The last column shows what percentage of ngrams are mantained in the ngram-dictionary in order to perform the prediction algorithm.  
+
+ 
+```{r charging ngram files, reading them as dataframes and pruning}
+
+#single word
+df_ngram_1<-read.csv("outfile_gram_1.csv", header = FALSE, col.names = c("first words", "last word", "frequency"))
+rows1<-nrow(df_ngram_1)
+
+df_ngram_1<-filter(df_ngram_1, frequency>1)
+rows1_pruned<-nrow(df_ngram_1)
+
+saving1<-paste(round((rows1_pruned/rows1)*100, 2), "%")
+
+
+#bi-gram
+df_ngram_2<-read.csv("outfile_gram_2.csv", header = FALSE, col.names = c("first words", "last word", "frequency"))
+rows2<-nrow(df_ngram_2)
+
+df_ngram_2<-filter(df_ngram_2, frequency>1)
+rows2_pruned<-nrow(df_ngram_2)
+
+saving2<-paste(round((rows2_pruned/rows2)*100, 2), "%")
+
+
+#tri-gram
+df_ngram_3<-read.csv("outfile_gram_3.csv", header = FALSE, col.names = c("first words", "last word", "frequency"))
+rows3<-nrow(df_ngram_3)
+
+df_ngram_3<-filter(df_ngram_3, frequency>1)
+rows3_pruned<-nrow(df_ngram_3)
+
+saving3<-paste(round((rows3_pruned/rows3)*100, 2), "%")
+
+
+#4-gram
+df_ngram_4<-read.csv("outfile_gram_4.csv", header = FALSE, col.names = c("first_words", "last_word", "frequency"))
+rows4<-nrow(df_ngram_4)
+
+df_ngram_4<-filter(df_ngram_4, frequency>1)
+rows4_pruned<-nrow(df_ngram_4)
+
+saving4<-paste(round((rows4_pruned/rows4)*100, 2), "%")
+
+NGramOrder<-c(1:4)
+NRowsBeforePruning<-c(rows1, rows2, rows3, rows4)
+NRowsAfterPruning<-c(rows1_pruned, rows2_pruned, rows3_pruned, rows4_pruned)
+Saving<-c(saving1, saving2, saving3, saving4)
+rows_df<-cbind.data.frame(NGramOrder, NRowsBeforePruning, NRowsAfterPruning, Saving)
+kable(rows_df)
+```
+
+
+
+
+
+
+###Steps to build a Shiny-app.  
+
+* Build a ngram dictionary  
+A single corpus text is derived from the three sample text sets taken from the different sources (twitter, blogs, news). Despite the source is relevant because the probability of a given word or a given combination of words depends on the context, I chose to unify the three sets because we cannot know in which context the app will be applied to predict a word and in order to enhance the probability of a successful prediction we decide to return more than one choise with the correspondent probability.
+After exploratory analysis and elaboration of the corpus were performed, a n-gram dictionary was built. This dictionary is composed of three files with ".csv" extension in which bi-gram, trigram and 4-gram were archivied. Then, for each n-gram, the last word is split and the original n-gram is divided in (n-1)words and the last word, so that a bigram becomes a unigram/unigram pair, a trigram becomes a bigram/unigram pair a 4-gram becomes a trigram/unigram pair.
+
+* Markov assumption  
+Starting from the Markov assumption, we can affirm that the probability of a word depends only on the probability of the n previous words.
+
+* Chain Rule  
+By the Chain Rule we can decompose a joint probability, e.g. P(w1,w2,w3)
+P(w1,w2, ...,wn) = P(w1|w2,w3,...,wn) P(w2|w3, ...,wn) ... P(wn-1|wn) P(wn)
+
+* Build a prediction algorithm for the app.
+I develop a prediction algorithm based on the Markov assumption and on the chain rule.
+The app will allow the user to enter a text. If this text has the length of one, two or three words, the app search if in the dictionary is present a bigram, trigram or 4-gram with the words of the first part equal to the inserted text and return the last word of the pair. If the inserted text has more than three words only the last three words ara considered.
+
+* Smoothing algorithm: how do you handle unseen n-grams.  
+If the inserted text is not found in the n-gram dictionary a smoothing algorithm between stupid-back-off and Kneser-Ney is choosen to predict the most probable word.
+
+* Evaluation of language model prediction accuracy.
+One way to estimate how well the language model fits a corpus is to use perplexity and entropy. Another way is comparing results of different language models i.e.  that use different smoothing algorithm. 
+
+* Attention was paid to the trade-off between accuracy and efficiency (prediction time and RAM used)
+
+
+###References
+[1] “Speech and Language Processing”, by D. Jurafsky & al, Chapter 4, Draft of January 9, 2015 @ https://web.stanford.edu/~jurafsky/slp3/  
+[2] [JHU DS Capstone Swiftkey Dataset](https://d396qusza40orc.cloudfront.net/dsscapstone/dataset/Coursera-SwiftKey.zip)  
+[3] Shutterstock List of Bad Words @ “https://raw.githubusercontent.com/shutterstock/List-of-Dirty-Naughty-Obscene-and-Otherwise-Bad-Words/master/en”  
